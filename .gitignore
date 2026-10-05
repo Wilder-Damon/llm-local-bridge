@@ -1,0 +1,41 @@
+# Local runtime, deployment snapshots, and generated evidence
+data/
+releases/
+verification/
+evidence/
+demo-output/
+.local/
+logs/
+__pycache__/
+*.py[cod]
+
+# Mailboxes and SQLite sidecars, including non-default names
+*.sqlite*
+*.db
+*.db-*
+*-wal
+*-shm
+*-journal
+
+# Operational journals, locks, checkpoints and claims
+*.jsonl
+*.log
+*.lock
+*-claim*.json
+*-checkpoint*.json
+*-seen.json
+*-events.json
+
+# Local configuration / secrets
+.env
+.env.*
+.aws/
+.codex/
+.agents/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Installation-specific handoff; use the general integration guides instead
+docs/CLAUDE-HANDOFF.txt
