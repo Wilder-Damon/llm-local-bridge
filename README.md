@@ -36,11 +36,14 @@ needs its supported connected local executor; the bridge does not provide one.
 | Stable-ID deduplication and stale-token fencing | A retry must preserve its original identity |
 | Recipient claims, leases and explicit task state | Claims do not lock repository files |
 | Read-only health, bounded watching, journal/checkpoint guards | No persistent service or automatic agent wake-up |
+| Changes feed with guarded cursors and exact-SHA read checks | Metadata does not establish reading, acceptance or review |
+| Bounded health observation with probe output/exit retention | A killed launcher cannot attest to its own termination |
 | Symmetric execution/review roles | Routing labels are not authentication or authorization |
 
 There is no quota API, capacity scheduler, automatic ownership transfer, authenticated
 multi-host server, automatic journal repair, or bundled persistent supervisor. Compact
-manifests/reset checkpoints below are proposed adapter patterns, not new implemented commands.
+reset checkpoints remain adapter patterns. The read-only `changes` feed and `observe.py`
+diagnostic are implemented; neither automatically wakes or directs an agent.
 
 ## Start
 
@@ -80,7 +83,8 @@ before the command; every command provides `--help`.
 | `health` | Read-only integrity checks and aggregate delivery counts; no message bodies or tokens |
 | `send --actor ROLE --file PATH` | Validate and enqueue a root request |
 | `list [--recipient ROLE] [--delivery queued\|claimed\|acked] [--limit N]` | Delivery metadata, oldest first |
-| `read MESSAGE_ID` | Immutable untrusted content and delivery metadata, without claim token |
+| `read MESSAGE_ID [--expected-commit SHA]` | Immutable untrusted content; optional stale-revision rejection |
+| `changes [--after N --anchor DIGEST] [--limit N]` | Changed-message metadata with guarded audit pagination |
 | `claim --actor ROLE [--message-id ID] [--lease-seconds N]` | Claim one available incoming delivery |
 | `renew ID --actor ROLE --token TOKEN [--lease-seconds N]` | Extend an active claim |
 | `ack ID --actor ROLE --token TOKEN` | Finish delivery without a reply; same-token retries are idempotent |
@@ -199,6 +203,11 @@ allowed transitions and current revision before updating.
 - **Independent review:** the peer reads required exact content. Publication, approval and
   merge remain separate authorized actions; `closed` is only bookkeeping.
 
+See [changes and exact-revision handoffs](docs/CHANGES.md) for precise receipt/status
+meanings, stale-request handling, output-versus-input SHAs and a compact body template.
+`read --expected-commit SHA` compares against a caller-supplied exact revision; a mismatch
+does not acknowledge, close or discard the old request or its unresolved findings.
+
 A claim fences one delivery attempt, not file edits across separate requests. Agree on
 non-overlapping scopes or isolated checkouts and name one owner per agreed scope. An expired
 lease does not transfer repository ownership. The old owner stops conflicting edits before
@@ -246,7 +255,8 @@ Local polling and storage do not themselves consume model tokens. Repeated full 
 results, empty polls, healthy heartbeats and entire transcripts can. Avoid duplicate scans
 and unproductive review loops; preserve readable meaning rather than cryptic abbreviations.
 
-- Inspect bounded metadata with `list` and incremental audit pages using `audit --after`.
+- Inspect `changes` for incremental metadata, `list` for current delivery/lease metadata,
+  and `audit --after` for historical events and reasons.
 - Fetch selected exact bodies with `read MESSAGE_ID`. Cache immutable context by digest
   locally; re-fetch unknown/mismatched context and changed relevant content.
 - Send changes only: task/owner/revision, result, evidence reference, blocker and next step.
@@ -257,13 +267,12 @@ and unproductive review loops; preserve readable meaning rather than cryptic abb
 - If every body is already known to be needed, fetch it directly rather than paying for
   a manifest pass first.
 
-A **proposed, not implemented** compact adapter would provide readable delta manifests
-with full task/message IDs, sender/owner, kind, state/revision, reply reference, summary,
-context digest and artifact reference plus verified hash. Suggested writing targets are
-roughly 640 bytes per row, 4 KiB per page and 1.5 KiB per ordinary handoff. These never justify
-omitting essential meaning. Unknown hashes stay unknown. There is no `manifest` command,
-capacity scheduler, automatic model wake, or new transport schema; all v1 fields remain
-required in stored envelopes.
+The implemented `changes` feed includes full IDs, sender/owner, state/revision/reason,
+reply reference, exact input SHA and immutable payload digest. It limits pages by audit
+event count, not a promised byte size. Save its cursor and anchor only after handling the
+page; identity mismatches fail closed. Read [the feed contract and synthetic benchmark](docs/CHANGES.md).
+Artifact verification, capacity scheduling and automatic model wake remain unimplemented.
+No transport schema changed; all v1 fields remain required in stored envelopes.
 
 Watcher seen IDs and viewer cursors provide local deduplication/resume, not a full reset
 checkpoint or proof of external delivery. A future adapter must distinguish seen, durably
@@ -277,18 +286,25 @@ retaining per-ID outcomes and lease checks. No atomic batch-ack CLI is implement
 atomic `reply` when responding. Bytes, token estimates, provider usage and prices are
 different measurements; do not claim exact token/cost savings without evidence.
 
-## Watching and recovery
+## Watching, observation and recovery
 
 ```powershell
 python bridge.py --db .\data\shared.sqlite3 health
 python watch.py --db .\data\shared.sqlite3 --recipient smith --seconds 1800 --interval 10 --seen-file .\data\watch-seen.json --events-file .\data\watch-events.jsonl
 python viewer.py --db .\data\shared.sqlite3 --seconds 1800 --interval 2 --cursor-file .\data\viewer-cursor.json
+python observe.py --db .\data\shared.sqlite3 --seconds 300 --interval 60 --timeout 5 --output .\logs\observation-001
 ```
 
 `health` checks integrity and reports delivery counts, expired claims and audit sequence
 without bodies/tokens or delivery mutation. It does not prove agent receipt. Watcher and
 viewer windows are 1–3,600 seconds; watcher health records and UTC deadlines are explicit.
 BUSY/LOCKED reads use bounded per-source backoff. Other failures stop for inspection.
+
+The separate [health observer](docs/OBSERVATION.md) retains per-probe stdout/stderr, PID,
+exit code and timeout evidence, plus a final result. It uses a new output directory,
+has a bounded explicit window, stops on failure, and does not restart watchers. Missing
+finalization means the launcher's outcome is unknown; executor/session lifetime is not
+guaranteed. No observer is started by receiving a message.
 
 If an operator separately authorizes an external supervisor, keep a single owner, explicit
 end time, bounded recovery and recorded stop/renewal outcomes. Never silently extend that
@@ -325,9 +341,10 @@ transport or tamper-proof ledger. Durability depends on functioning storage hono
 the roundtrip use temporary synthetic workspaces only. The demo exercises 17 real CLI calls;
 provide `--output NEW_DIRECTORY` to retain a synthetic transcript deliberately.
 
-The suite has 59 distinct tests covering transactions, concurrency, crash/restart, leases,
+The suite has 74 distinct tests covering transactions, concurrency, crash/restart, leases,
 duplicates, role/revision guards, containment, unknown versions, lock contention, deadlines,
-state ownership, journals/cursors and both peer directions. Passing it is not long-duration
+state ownership, journals/cursors, guarded changes, exact-SHA reads, observer probe timeouts,
+exit retention/finalization and both peer directions. Passing it is not long-duration
 soak proof, power-loss proof, authentication, guaranteed cloud receipt, or permission to
 exceed provider limits. Never fault-inject against a live mailbox.
 

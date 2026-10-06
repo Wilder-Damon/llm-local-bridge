@@ -385,12 +385,17 @@ class Mailbox:
             return {'request_id': request_id, 'state': state, 'revision': revision + 1}
         return self.write(action)
 
-    def read(self, message_id):
+    def read(self, message_id, expected_commit=None):
         db = self.connect()
         try:
             row = dict(self.row(db, message_id))
             row.pop('lease_token')  # read never hands another process its claim credential
             row['message'] = json.loads(row.pop('payload'))
+            if expected_commit is not None:
+                require(isinstance(expected_commit, str) and re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', expected_commit),
+                        'expected commit must be exact lowercase 40/64 hex SHA')
+                require(row['message']['repository']['commit'] == expected_commit,
+                        'message commit differs from expected revision; preserve the request and reconcile stale findings before acting')
             row['untrusted'] = True
             return row
         finally:
@@ -418,6 +423,53 @@ class Mailbox:
         finally:
             db.close()
 
+    def changes(self, after=0, limit=100, anchor=None):
+        """Read-only audit page plus current metadata; never a receipt or approval."""
+        require(type(after) is int and after >= 0 and type(limit) is int and 1 <= limit <= 100,
+                'changes requires after >= 0 and limit 1..100')
+        db = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute('PRAGMA query_only=ON')
+            db.execute('BEGIN')
+            require(db.execute('PRAGMA user_version').fetchone()[0] == VERSION, 'unsupported database version')
+            first = db.execute('SELECT * FROM audit ORDER BY sequence LIMIT 1').fetchone()
+            require(first is not None, 'mailbox audit identity is missing; preserve files and inspect')
+            high = db.execute('SELECT MAX(sequence) FROM audit').fetchone()[0]
+            require(after <= high, 'changes cursor is ahead of mailbox history; preserve cursor and reconcile')
+
+            def cursor_anchor(sequence):
+                boundary = db.execute('SELECT * FROM audit WHERE sequence=?', (sequence,)).fetchone() if sequence else first
+                require(boundary is not None, 'changes cursor boundary is missing')
+                context = [str(self.path), dict(first), dict(boundary)]
+                return hashlib.sha256(canonical(context).encode('utf-8')).hexdigest()
+
+            require(after == 0 or anchor is not None, 'resuming changes requires the saved --anchor')
+            if anchor is not None:
+                require(anchor == cursor_anchor(after), 'changes cursor identity mismatch; preserve cursor and reconcile')
+            page = list(db.execute('SELECT sequence,event,message_id FROM audit WHERE sequence>? ORDER BY sequence LIMIT ?',
+                                   (after, limit)))
+            ids = list(dict.fromkeys(row['message_id'] for row in page if row['message_id'] is not None))
+            messages = []
+            for message_id in ids:
+                row = db.execute('''SELECT m.message_id,m.request_id,m.sender,m.recipient,m.delivery,
+                    m.digest,m.payload,t.recipient AS owner,t.state AS task_state,t.revision AS task_revision,
+                    t.reason AS task_reason
+                    FROM messages m JOIN tasks t USING(request_id) WHERE m.message_id=?''', (message_id,)).fetchone()
+                require(row is not None, 'audit references missing message; preserve files and inspect')
+                item = dict(row)
+                payload = json.loads(item.pop('payload'))
+                item.update(kind=payload['kind'], correlation_id=payload['correlation_id'],
+                            repository=payload['repository'])
+                messages.append(item)
+            next_after = page[-1]['sequence'] if page else after
+            return {'events': [dict(row) for row in page], 'messages': messages,
+                    'next_after': next_after, 'anchor': cursor_anchor(next_after),
+                    'snapshot_sequence': high, 'has_more': next_after < high,
+                    'read_only': True, 'untrusted': True}
+        finally:
+            db.close()
+
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
@@ -437,7 +489,13 @@ def parser():
     cmd.add_argument('--recipient', choices=sorted(ROLES))
     cmd.add_argument('--delivery', choices=['queued', 'claimed', 'acked'])
     cmd.add_argument('--limit', type=int, default=100)
-    sub.add_parser('read').add_argument('message_id')
+    cmd = sub.add_parser('read')
+    cmd.add_argument('message_id')
+    cmd.add_argument('--expected-commit', help='reject a handoff pinned to a different exact revision')
+    cmd = sub.add_parser('changes', help='read-only changed-message metadata; bodies and tokens omitted')
+    cmd.add_argument('--after', type=int, default=0)
+    cmd.add_argument('--anchor', help='saved cursor identity; required when after > 0')
+    cmd.add_argument('--limit', type=int, default=100, help='audit events per page, 1..100')
     cmd = sub.add_parser('claim')
     cmd.add_argument('--actor', choices=sorted(ROLES), required=True)
     cmd.add_argument('--message-id')
@@ -481,7 +539,9 @@ def main(argv=None):
         elif c == 'status':
             result = box.status(args.request_id, args.actor, args.state, args.expected_revision, args.reason)
         elif c == 'read':
-            result = box.read(args.message_id)
+            result = box.read(args.message_id, args.expected_commit)
+        elif c == 'changes':
+            result = box.changes(args.after, args.limit, args.anchor)
         elif c == 'list':
             require(1 <= args.limit <= 1000, 'limit must be 1..1000')
             result = box.list(args.recipient, args.delivery, args.limit)

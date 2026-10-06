@@ -24,6 +24,13 @@ unread/changed reviews, decisions, conditions and acceptance criteria before act
 do not substitute for them. Receipt, acceptance, completion, independent review, publication
 and merge are separate milestones. Stop repeated unproductive exchanges and involve the user.
 
+Use the [changes feed and handoff template](CHANGES.md) for readable deltas. Pin input,
+output and reviewed commits distinctly; `read --expected-commit SHA` can reject a stale
+input before use. A mismatch is a reason to reconcile old findings, not discard them.
+An `acked` delivery can still have task state `acknowledged`; claim/ack alone never means
+the owner accepted or completed work. Record acceptance as an explicit `working` transition
+and completion as reported evidence ready for review. Review verdicts need an exact SHA.
+
 Capacity/reset/budget signals may be reported as optional timestamped prose with a source.
 Unknown values remain unknown. No quota APIs, model routing, automatic delegation or scheduler
 are implemented. Avoid duplicate scans and reviews; helpers must remain separately authorized.

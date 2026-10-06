@@ -99,6 +99,25 @@ transition committed before retrying. Ack changes delivery only; it never closes
 Claim recovery does not reset task progress. Closed tasks cannot be claimed or receive new
 replies; existing delivery metadata remains available for inspection.
 
+`acknowledged` is an automatic claim milestone, not acceptance. `working` is the recipient's
+explicit work report; `ready_for_review` is an outcome report, not an independent review.
+Review verdict, exact reviewed/output SHA, conditions, publication and merge evidence must
+be stated explicitly in inert message bodies and evaluated under actual user authorization.
+No transport state automatically establishes those external milestones.
+
+## Read-only changes and revision checks
+
+The additive `changes` command pages the existing audit trail with current message/task
+metadata from one read-only snapshot. It requires the returned anchor when resuming after
+a positive sequence, detects database/path/boundary mismatches and rejects cursors ahead of
+history. It does not alter v1 storage or envelopes. Metadata is not a read receipt or a
+replacement for complete reviews/criteria; see [the feed contract](CHANGES.md).
+
+`read MESSAGE_ID --expected-commit SHA` optionally rejects a different exact input SHA.
+It does not run Git, discover HEAD, discard stale messages or modify task/delivery state.
+Replies still preserve the original input SHA. Report a new output SHA in the body and,
+when authorized, originate a separate root pinned to that revision for independent review.
+
 ## Escalation and loop bounds
 
 The transport permits **at most 12 replies per root request**. The thirteenth is rejected
